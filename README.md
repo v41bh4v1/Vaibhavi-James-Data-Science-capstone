@@ -1,5 +1,6 @@
 # Data Science Capstone: Blue Bike Membership vs. Location 
 *Vaibhavi James*
+\
 *Wellesley College, Class of 2025*
 
 ## File Structure
