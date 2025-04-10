@@ -1,0 +1,224 @@
+---
+title: "DS 340H Homework 8"
+author: "Vaibhavi James"
+date: "2025-03-11"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load packages
+packs <- c('tidyverse','gridExtra', 'sf', 'terra', 'viridis','gstat','sp','ggmap')
+lapply(packs, require, character.only = TRUE)
+
+bikes <- read.csv('bluebike_cleaned.csv')
+stations.ref <- read.csv('Bluebikes_Station_List.csv')
+bikes <- bikes %>% dplyr::select(-X)
+
+names(stations.ref) = stations.ref[1,]
+stations.ref <- stations.ref[-1,]
+stations.ref <- stations.ref[,-10]
+stations.ref <- stations.ref[,-9]    
+
+stations.ref <- stations.ref %>%
+  rename('start_station_id' = 'Number')
+
+head(bikes)
+head(stations.ref)
+
+```
+
+```{r data cleaning}
+stations <- bikes %>%
+  group_by(start_station_id) %>% 
+  summarise(
+    total_rides = n(),  # Count total rides per station
+    member_rides = sum(member_casual=='member'),  # Count members
+    membership_proportion = member_rides / total_rides  # Calculate proportion
+  )
+
+stations <- stations %>%
+  left_join(stations.ref, by = 'start_station_id')
+stations <- stations[-1,]
+
+stations <- stations %>%
+  mutate(across(c('Lat', 'Long'), as.numeric))
+
+stations <- stations %>%
+  drop_na('Lat')
+
+stations.sf <- stations %>% st_as_sf(coords = c("Long", "Lat"), crs = 4326)  # WGS 84 (standard GPS)
+```
+
+
+```{r Boston map}
+# Extract and convert bbox to numeric vector
+bbox <- st_bbox(stations.sf)
+bbox_vector <- c(
+  left = as.numeric(bbox["xmin"]),
+  bottom = as.numeric(bbox["ymin"]),
+  right = as.numeric(bbox["xmax"]),
+  top = as.numeric(bbox["ymax"])
+)
+
+# Optional: expand slightly for margin
+bbox_vector <- bbox_vector + c(-0.005, -0.005, 0.005, 0.005)
+
+# Use get_stamenmap with valid maptype
+# Note: to use Stadiamaps, you need to register for an API 
+boston_map <- get_stadiamap(
+  bbox = bbox_vector,
+  zoom = 13,
+  maptype = "stamen_toner_lite"
+)
+```
+
+```{r observed plot not filtered, fig.align='center'}
+ggmap(boston_map) +
+  geom_sf(data = stations.sf, aes(color = membership_proportion), size = 2,inherit.aes = FALSE) +
+  labs(title = "Observed Proportions of Members at Blue Bike Starting Stations",
+       x="Longitude",
+       y="Latitude",
+       color="Membership Proportion") +
+  scale_color_viridis_c(option='turbo')+ 
+  theme_minimal()
+
+```
+
+```{r observed plot filtered, fig.align='center'}
+stations.sf <- stations.sf %>% filter(Municipality=='Boston'|
+                                        Municipality=='Cambridge')
+bbox <- st_bbox(stations.sf)
+bbox_vector <- c(
+  left = as.numeric(bbox["xmin"]),
+  bottom = as.numeric(bbox["ymin"]),
+  right = as.numeric(bbox["xmax"]),
+  top = as.numeric(bbox["ymax"])
+)
+
+# Optional: expand slightly for margin
+bbox_vector <- bbox_vector + c(-0.005, -0.005, 0.005, 0.005)
+
+# Use get_stamenmap with valid maptype
+boston_map <- get_stadiamap(
+  bbox = bbox_vector,
+  zoom = 13,
+  maptype = "stamen_toner_lite"
+)
+ggmap(boston_map) +
+  geom_sf(data = stations.sf, aes(color = membership_proportion), size = 2,inherit.aes = FALSE) +
+  labs(title = "Observed Proportions of Members at Blue Bike Starting Stations (Boston and Cambridge)",
+       x="Longitude",
+       y="Latitude",
+       color="Membership Proportion") +
+  scale_color_viridis_c(option='turbo')+ 
+  theme_minimal()
+
+```
+
+```{r sample variogram, fig.align='center'}
+# Fit a sample variogram for universal kriging
+sample_variogram <- variogram(membership_proportion ~ total_rides, stations.sf)
+plot(sample_variogram)
+```
+
+```{r fit variogram, fig.align='center'}
+# Autofit fit a fitted variogram to sample
+f.vgram <- automap::autofitVariogram(membership_proportion~total_rides, as(stations.sf, 'Spatial'))
+plot(f.vgram)
+```
+
+```{r prediction grid, fig.align='center'}
+# Prediction grid
+grid <-rast(stations.sf, nrows=100, ncols=100)
+# Extract the coordinates of all cells
+xy <- as.data.frame(raster::xyFromCell(grid, 1:ncell(grid)))
+# Transform xy data frame to sf object and assign CRS
+pred.locations <- st_as_sf(xy, coords=c("x", "y"), crs=st_crs(stations.sf))
+
+# Create a bounding polygon from the station points
+stations_hull <- st_convex_hull(st_union(stations.sf))  
+
+# Filter only points inside this area
+pred.locations <- st_filter(pred.locations, stations_hull)
+
+pred.locations <- pred.locations %>%
+  mutate(total_rides = 1, 
+         docks = 1)
+
+# Plot prediction grid
+pred.locations %>% ggplot() + 
+  geom_sf() +theme_bw() + 
+  labs(title="Prediction Grid",
+       y = "Latitude",
+       x="Longitude")
+```
+
+```{r kriging, fig.align='center'}
+# Apply the Kriging weights to the known data values at the sample locations 
+k.samp <- gstat(formula=membership_proportion~total_rides, 
+      data=stations.sf,
+      model=f.vgram$var_model)
+
+# Interpolating the surface using the fitted variogram.
+krige.pred <- predict(k.samp, pred.locations)
+
+class(krige.pred)
+names(krige.pred)
+krige.pred.sf <- st_as_sf(krige.pred)
+
+# Get the bounding box for the prediction locations
+bbox <- st_bbox(krige.pred.sf)
+bbox_vector <- c(
+  left = as.numeric(bbox["xmin"]),
+  bottom = as.numeric(bbox["ymin"]),
+  right = as.numeric(bbox["xmax"]),
+  top = as.numeric(bbox["ymax"])
+)
+
+# Expand slightly for margin
+bbox_vector <- bbox_vector + c(-0.005, -0.005, 0.005, 0.005)
+
+# Get the map using valid map type
+pred_map <- get_stadiamap(
+  bbox = bbox_vector,
+  zoom = 13,
+  maptype = "stamen_toner_lite"  # Or another maptype
+)
+
+
+# Plot the predictions
+ggmap(pred_map) +
+  geom_sf(data = krige.pred.sf, aes(color = var1.pred), alpha=0.45,inherit.aes = FALSE) +
+  scale_color_viridis(option = 'turbo') +
+  theme_bw() +
+  labs(title = 'Interpolated Surface',
+       x = 'Latitude',
+       y = 'Longitude',
+       col = 'Membership Proportion (predicted)')
+```
+
+```{r Cross-validation}
+set.seed(7515)
+
+cross.valid <- gstat.cv(k.samp, nfold=5)
+cv.df = cross.valid@data[, c('observed', 'var1.pred','residual')]
+
+# Create Bubble plot
+cv.df %>% 
+  ggplot(aes(x=observed, y=var1.pred, colour = residual)) +
+  geom_point(alpha=0.5) + scale_color_viridis(option='turbo')+
+  theme_bw() +
+  labs(title = 'Residual Bubble Plot', y = 'Predicted \n', 
+       x = '\n Observed', col='Residual') 
+
+# Calculate RMSE
+cv.df %>%
+  summarise(RMSE=sqrt(sum((var1.pred-observed)^2)/ n()))
+```

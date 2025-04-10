@@ -1,0 +1,64 @@
+---
+title: "DS 340H Homework 6"
+author: "Vaibhavi James"
+date: "2025-03-05"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+always_allow_html: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+```
+
+
+```{r data, include=FALSE}
+# Load data
+stations <- read.csv('/Users/vaibhavijames/Desktop/ds 340H/Bluebikes_Station_List.csv')
+trips <- read.csv('/Users/vaibhavijames/Desktop/ds 340H/202501-bluebikes-tripdata.csv')
+
+# Reassign column names
+names(stations) = stations[1,]
+
+# Remove first row and last two columns
+stations <- stations[-1,]
+stations <- stations[,-10]
+stations <- stations[,-9]
+
+trips_stations <- trips %>% 
+  left_join(stations %>% select('Municipality', 'Seasonal Status', "Number"), by = c("start_station_id" = "Number")) %>%
+  rename(start_mun = Municipality, start_season_stat = "Seasonal Status") %>% 
+  left_join(stations %>% select('Municipality', 'Seasonal Status', "Number"), by = c("end_station_id" = "Number")) %>%
+  rename(end_mun = Municipality, end_season_stat = "Seasonal Status")
+
+# Replace NAs  
+trips_stations <- trips_stations %>% 
+  mutate(
+    end_lat = replace_na(end_lat, median(end_lat, na.rm=TRUE)),
+    end_lng = replace_na(end_lng, median(end_lng, na.rm=TRUE)),
+    end_mun = replace_na(end_mun, "Unknown"),
+    end_season_stat = replace_na(end_season_stat, "Unknown"),
+    end_station_name = replace_na(end_station_name, "Unknown"),
+    end_station_id = replace_na(end_station_id, "Unknown")
+  )
+
+summary(trips_stations)
+
+# Write cleaned data to .csv
+write.csv(trips, 'bluebike_cleaned.csv')
+```
+
+```{r Bar plot}
+na.omit(trips_stations) %>% ggplot(aes(x=start_mun)) + geom_bar(fill='#FFCAEA') +
+  labs(title='Distribution of Starting Municipalities', x='Municipality', y='Count') +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust=0.5))
+
+
+```
